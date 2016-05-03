@@ -17,6 +17,8 @@ import (
 
 var SVC_ACCT_EMAIL = "524816920325-tj75v0nolh6dr22fafodpbncma25dgkn.apps.googleusercontent.com"
 var SVC_ACCT_PRIVATE_KEY_PATH = "/mnt/mbox/import-mailbox-to-gmail_go/private_key.pem"
+var LABEL_NAME = "import_label"
+var MBOX_DIR = "./mbox/"
 
 func Build_Gmail_Service(sub_user string) (*gmail.Service, error) {
 	buf, err := ioutil.ReadFile(SVC_ACCT_PRIVATE_KEY_PATH)
@@ -46,13 +48,84 @@ func Build_Gmail_Service(sub_user string) (*gmail.Service, error) {
 	}
 }
 
-func Parse_Mbox(filename string) ([]*mail.Message, error) {
+func Create_Label(svc *gmail.Service, labelName string) (*string, error) {
+	label := gmail.Label{
+		Name: labelName,
+		// TODO - this is off to show the label in the inbox list for easier deletion
+		// LabelListVisibility: "labelHide",
+		MessageListVisibility: "hide",
+	}
+	ret, err := svc.Users.Labels.Create("me", &label).Do()
+	if err != nil {
+		//TODO - if label exists, get that one and return it
+		return nil, err
+	} else {
+		return &ret.Id, nil
+	}
+}
+
+func Process_Mbox(filename string) ([]*mail.Message, error) {
+	fmt.Printf("Processing mbox: %s\n", filename)
 	r, err := mbox.ReadFile(filename, false)
 	if err != nil {
-		fmt.Printf("Error reading mbox file: %v", err)
+		fmt.Printf("Error reading mbox file: %v\n", err)
 		return nil, err
 	} else {
 		return r, nil
+	}
+}
+
+func Worker_User(userName string) {
+	fmt.Printf("Processing user: %s\n", userName)
+	svc, err := Build_Gmail_Service(userName)
+	if err != nil {
+		fmt.Printf("Error building gmail service: %v", err)
+	} else {
+		// Generate a label
+		labelId, err := Create_Label(svc, LABEL_NAME)
+		if err != nil {
+			fmt.Printf("Error creating label: %v", err)
+		} else {
+			// Get list of mboxes
+			files, err := ioutil.ReadDir(MBOX_DIR + userName)
+			if err != nil {
+				fmt.Printf("Could not parse directory: ", err)
+			} else {
+				// Iterate mboxes and generate list of msgs
+				for _, mbox := range files {
+					fmt.Printf("Mbox: %s\n", mbox.Name())
+					// TODO - This will be done by Worker_Mbox
+					msgs, err := Process_Mbox(MBOX_DIR + userName + "/" + mbox.Name())
+					if err == nil {
+						for _, msg := range msgs {
+							var reformed_msg string
+							for k, v := range msg.Header {
+								reformed_msg += fmt.Sprintf("%s: %s\r\n", k, v[0])
+							}
+							buf := new(bytes.Buffer)
+							buf.ReadFrom(msg.Body)
+							b := buf.Bytes()
+							s := *(*string)(unsafe.Pointer(&b))
+							reformed_msg += "\r\n" + s
+
+							gmsg := gmail.Message{
+								Raw:      base64url.Encode([]byte(reformed_msg)),
+								LabelIds: []string{*labelId},
+							}
+							_, err = svc.Users.Messages.Insert("me", &gmsg).Do()
+							if err != nil {
+								fmt.Printf("ERROR: %v", err)
+							} else {
+								fmt.Println("Email imported successfully")
+							}
+							// TODO - Only run a single email
+							os.Exit(1)
+						}
+					}
+
+				}
+			}
+		}
 	}
 }
 
@@ -60,15 +133,50 @@ func main() {
 	fmt.Print("BEGIN\n")
 
 	user_id := "angela.starke@kohls.com"
-	svc, err := Build_Gmail_Service(user_id)
+	Worker_User(user_id)
+	os.Exit(1)
 
-	msgs, err := Parse_Mbox("/mnt/mbox/import-mailbox-to-gmail_go/mbox/angela.starke@kohls.com/Export_angela.mayweatherskohls.com_202458127_2012_1.mbox")
+	svc, err := Build_Gmail_Service(user_id)
+	labelId, err := Create_Label(svc, "testLabel")
+	if err != nil {
+		fmt.Printf("ERROR creating label: %v", err)
+	} else {
+		fmt.Printf("LabelId: %s", *labelId)
+	}
+	os.Exit(1)
+
+	// get label id for test
+	// ret, err := svc.Users.Labels.Get("Name", "test").Do()
+	/*
+		  // List
+		  ret, err := svc.Users.Labels.List("angela.starke@kohls.com").Do()
+		  if err != nil {
+			fmt.Printf("ERROR GETTING LABEL: %v", err)
+		  } else {
+			for _, label := range ret.Labels {
+			  fmt.Printf("Label: %s,%s\n", label.Name, label.Id)
+			}
+		  }
+	*/
+	ret, err := svc.Users.Labels.Get("me", "Label_110").Do()
+	if err != nil {
+		fmt.Printf("ERROR GETTING LABEL: %v", err)
+	} else {
+		fmt.Printf("Label: %s", ret.Name)
+		fmt.Printf("Id: %s", ret.Id)
+	}
+	os.Exit(1)
+
+	msgs, err := Process_Mbox("/mnt/mbox/import-mailbox-to-gmail_go/mbox/angela.starke@kohls.com/Export_angela.mayweatherskohls.com_202458127_2012_1.mbox")
 	if err == nil {
 		for _, msg := range msgs {
 			var reformed_msg string
+			reformed_msg = fmt.Sprintf("%s: %s\r\n", "labelIds", "test")
 			for k, v := range msg.Header {
 				reformed_msg += fmt.Sprintf("%s: %s\r\n", k, v[0])
 			}
+			// fmt.Printf("%s\n", reformed_msg)
+			// os.Exit(1)
 
 			buf := new(bytes.Buffer)
 			buf.ReadFrom(msg.Body)
@@ -77,18 +185,15 @@ func main() {
 			reformed_msg += "\r\n" + s
 
 			gmsg := gmail.Message{
-				// Raw: encodeWeb64String([]byte(reformed_msg)),
-				// Raw: b64.StdEncoding.EncodeToString([]byte(reformed_msg)),
-				Raw: base64url.Encode([]byte(reformed_msg)),
-				// Raw: reformed_msg,
+				Raw:      base64url.Encode([]byte(reformed_msg)),
+				LabelIds: []string{"test"},
 			}
 			fmt.Printf("%s\n", reformed_msg)
 			_, err = svc.Users.Messages.Insert("me", &gmsg).Do()
 			if err != nil {
 				fmt.Printf("ERROR: %v", err)
 			}
-
-			// Only run a single email
+			// TODO - Only run a single email
 			os.Exit(1)
 		}
 	}
