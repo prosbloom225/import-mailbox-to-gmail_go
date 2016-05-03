@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"net/mail"
 	"os"
+	"time"
 	"unsafe"
 )
 
@@ -19,6 +20,8 @@ var SVC_ACCT_EMAIL = "524816920325-tj75v0nolh6dr22fafodpbncma25dgkn.apps.googleu
 var SVC_ACCT_PRIVATE_KEY_PATH = "/mnt/mbox/import-mailbox-to-gmail_go/private_key.pem"
 var LABEL_NAME = "import_label"
 var MBOX_DIR = "./mbox/"
+
+var WORKER_MBOX_THREADS = 3
 
 func Build_Gmail_Service(sub_user string) (*gmail.Service, error) {
 	buf, err := ioutil.ReadFile(SVC_ACCT_PRIVATE_KEY_PATH)
@@ -75,6 +78,44 @@ func Process_Mbox(filename string) ([]*mail.Message, error) {
 	}
 }
 
+func Worker_Mbox(id int, labelId string, mboxes <-chan os.FileInfo, results chan<- int) {
+	for j := range mboxes {
+		fmt.Println("worker", id, "label", labelId, "processing mbox", j.Name())
+		time.Sleep(time.Second)
+		results <- 1
+		/*
+			msgs, err := Process_Mbox(MBOX_DIR + userName + "/" + mbox.Name())
+			if err == nil {
+			  // Loop through each msg in the mbox and import
+			  for _, msg := range msgs {
+				var reformed_msg string
+				for k, v := range msg.Header {
+				  reformed_msg += fmt.Sprintf("%s: %s\r\n", k, v[0])
+				}
+				buf := new(bytes.Buffer)
+				buf.ReadFrom(msg.Body)
+				b := buf.Bytes()
+				s := *(*string)(unsafe.Pointer(&b))
+				reformed_msg += "\r\n" + s
+
+				// TODO - retry logic/incremental backoff
+				gmsg := gmail.Message{
+				  Raw:      base64url.Encode([]byte(reformed_msg)),
+				  LabelIds: []string{*labelId},
+				}
+				_, err = svc.Users.Messages.Insert("me", &gmsg).Do()
+				if err != nil {
+				  fmt.Printf("ERROR: %v", err)
+				} else {
+				  fmt.Println("Email imported successfully")
+				}
+				// TODO - Only run a single email
+				// os.Exit(1)
+			  }
+		*/
+	}
+}
+
 func Worker_User(userName string) {
 	fmt.Printf("Processing user: %s\n", userName)
 	svc, err := Build_Gmail_Service(userName)
@@ -91,39 +132,27 @@ func Worker_User(userName string) {
 			if err != nil {
 				fmt.Printf("Could not parse directory: ", err)
 			} else {
-				// Iterate mboxes and generate list of msgs
+				// Build queues
+				mboxes := make(chan os.FileInfo, 100)
+				results := make(chan int, 100)
+				// Spin up worker_mbox threads
+				for w := 1; w <= WORKER_MBOX_THREADS; w++ {
+					go Worker_Mbox(w, *labelId, mboxes, results)
+				}
+
+				// Iterate mboxes
 				for _, mbox := range files {
 					fmt.Printf("Mbox: %s\n", mbox.Name())
-					// TODO - This will be done by Worker_Mbox
-					msgs, err := Process_Mbox(MBOX_DIR + userName + "/" + mbox.Name())
-					if err == nil {
-						for _, msg := range msgs {
-							var reformed_msg string
-							for k, v := range msg.Header {
-								reformed_msg += fmt.Sprintf("%s: %s\r\n", k, v[0])
-							}
-							buf := new(bytes.Buffer)
-							buf.ReadFrom(msg.Body)
-							b := buf.Bytes()
-							s := *(*string)(unsafe.Pointer(&b))
-							reformed_msg += "\r\n" + s
-
-							gmsg := gmail.Message{
-								Raw:      base64url.Encode([]byte(reformed_msg)),
-								LabelIds: []string{*labelId},
-							}
-							_, err = svc.Users.Messages.Insert("me", &gmsg).Do()
-							if err != nil {
-								fmt.Printf("ERROR: %v", err)
-							} else {
-								fmt.Println("Email imported successfully")
-							}
-							// TODO - Only run a single email
-							os.Exit(1)
-						}
-					}
-
+					mboxes <- mbox
 				}
+				close(mboxes)
+				fmt.Println("Waiting...")
+
+				for a := 1; a <= 9; a++ {
+					<-results
+				}
+				os.Exit(1)
+
 			}
 		}
 	}
